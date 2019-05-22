@@ -33,3 +33,97 @@ class GT extends CspSolver {
     gt(csp.vars, Assignment())
   }
 }
+class BT extends CspSolver {
+  def solve(csp: CSP): Option[Assignment] = {
+
+    def selectVariable(xs: Seq[Variable]): (Variable, Seq[Variable]) = (xs.head, xs.tail)
+    def valueOrder(dom: Domain): Seq[Int] = dom.values
+
+    def bt(xs: Seq[Variable], partialAssign: Assignment): Option[Assignment] = {
+
+      if (xs.isEmpty)
+        return Some(partialAssign)
+      val (x, remain) = selectVariable(xs)
+      for (v <- valueOrder(csp.doms(x))) {
+        val partial = partialAssign + (x -> v) // 変数 x に値 v を新たに割当てる
+        /* CSP の制約の中で現在値が割当たっている変数上のもの (検査が可能な制約) */
+        val consToBeTested = csp.cons.filter(c => c.vars.forall(partial.contains))
+        /* 検査が通れば次の値割当てを行う */
+        if (consToBeTested.forall(_.isSatisfiedWith(partial))) {
+          val sol = bt(remain, partial)
+          if (sol.nonEmpty)
+            return sol
+        }
+      }
+      None
+    }
+
+    bt(csp.vars, Assignment())
+  }
+}
+object dAC extends Function3[Constraint, Variable, Map[Variable, Domain], (Variable, Domain)] {
+  def apply(c: Constraint, x: Variable, doms: Map[Variable, Domain]): (Variable, Domain) = {
+    require(c.vars.contains(x))
+
+    val vs = c.vars.size match {
+      case 1 => doms(x).values.filter(v => c.isSatisfiedWith(Assignment(Map(x -> v))))
+      case 2 => {
+        val exceptX = c.vars.filter(_ != x)
+        for {v <- doms(x).values
+             y <- exceptX
+             if doms(y).values.exists(u => c.isSatisfiedWith(Assignment(Map(x -> v, y -> u))))} yield v
+      }
+      case _ => ???
+    }
+
+    (x, Domain(vs))
+  }
+}
+object bdAC extends Function2[Constraint, Map[Variable, Domain], Map[Variable, Domain]] {
+  def apply(c: Constraint, doms: Map[Variable, Domain]): Map[Variable, Domain] =
+    (for (x <- c.vars) yield dAC(c, x, doms)).filter(xd => doms(xd._1) != xd._2).toMap
+}
+trait AC extends Function1[CSP, CSP] {
+  def apply(csp: CSP): CSP
+}
+object AC3 extends AC {
+  def apply(csp: CSP): CSP = {
+    var domsWillBeRevised = csp.doms
+    val queue = scala.collection.mutable.Queue(csp.cons: _*)
+
+    while (queue.nonEmpty) {
+      //Logger.noloops += 1
+      val c0 = queue.dequeue()
+      val revisedDoms = bdAC(c0, domsWillBeRevised)
+      domsWillBeRevised ++= revisedDoms
+      if (revisedDoms.nonEmpty)
+        queue ++= revisedDoms.keys.flatMap(csp.var2cons).filter(c => !queue.contains(c) && c != c0)
+    }
+
+    new CSP(csp.vars, domsWillBeRevised, csp.cons)
+  }
+}
+class BTwithAC(ACfunc: AC) extends CspSolver {
+  def solve(csp: CSP): Option[Assignment] = {
+    def selectVariable(xs: Seq[Variable]): (Variable, Seq[Variable]) = (xs.head, xs.tail)
+
+    def valueOrder(dom: Domain): Seq[Int] = dom.values
+
+    def bt(xs: Seq[Variable], partialAssign: Assignment, csp0: CSP): Option[Assignment] = {
+      if (xs.isEmpty)
+        return Some(partialAssign)
+      val (x, remain) = selectVariable(xs)
+           for (v <- valueOrder(csp0.doms(x))) {
+        val revisedCSP = ACfunc(new CSP(csp0.vars, csp0.doms ++ (partialAssign + (x -> v)).toDoms, csp0.cons))
+        if (revisedCSP.hasNoEmptyDomain) {
+          val sol = bt(remain, partialAssign + (x -> v), revisedCSP)
+          if (sol.nonEmpty)
+            return sol
+        }
+      }
+      None
+    }
+
+    bt(csp.vars, Assignment(), csp)
+  }
+}
